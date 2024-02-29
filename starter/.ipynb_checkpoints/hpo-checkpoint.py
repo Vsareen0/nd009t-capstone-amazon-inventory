@@ -1,5 +1,5 @@
 """
-Script to perform train a model
+Script to perform hyperparameter optimization on a model
 """
 import numpy as np
 import torch
@@ -12,29 +12,19 @@ import torchvision.transforms as transforms
 import argparse
 import logging
 import os
-import time
 import sys
 from PIL import ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
-
-try:
-    import smdebug.pytorch as smd
-except ModuleNotFoundError:
-    print("[ERROR] Module 'smdebug' is not installed. Probably an inference container")
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.StreamHandler(sys.stdout))
 
 
-def test(model, test_loader, criterion, device, hook):
-    hook.set_mode(smd.modes.EVAL)
+def test(model, test_loader, criterion, device):
     model.eval()
     running_loss = 0
     running_corrects = 0
-    pred = []
-    label = []
-
 
     for inputs, labels in test_loader:
         inputs = inputs.to(device)
@@ -44,70 +34,12 @@ def test(model, test_loader, criterion, device, hook):
         _, preds = torch.max(outputs, 1)
         running_loss += loss.item() * inputs.size(0)
         running_corrects += torch.sum(preds == labels.data).item()
-        
-        logger.info(f"Prediction is:{preds}")
-        logger.info(f"Label is: {labels.data}")
-        
-        new_pred = preds.tolist()
-        new_label= labels.data.tolist()
-        
-        logger.info(f"Prediction List:{new_pred}")
-        logger.info(f"Label List: {new_label}")
-        
-        pred.extend(new_pred)
-        label.extend(new_label)
-        
-        logger.info(f"Final Prediction List Updated:{pred}")
-        logger.info(f"Final Label List Updated: {label}")
 
     total_loss = running_loss / len(test_loader.dataset)
     total_acc = running_corrects / len(test_loader.dataset)
-    
-    metrics = {0:{"tp":0, "fp":0}, 1:{"tp":0, "fp":0}, 2:{"tp":0, "fp":0}, 3:{"tp":0, "fp":0}, 4:{"tp":0, "fp":0}}
-    
-    label_count = {0:0, 1:0, 2:0, 3:0, 4:0}
-    for l, p in zip(label, pred):
-        label_count[l]+=1
-        if(p==l):
-            metrics[l]["tp"]+=1
-        else:
-            metrics[p]["fp"]+=1
-    
-    logger.info(f"Metrics Computed: {metrics}")
-    logger.info(f"Label Count Computed: {label_count}")
-    
-    F1 = {0:0, 1:0, 2:0, 3:0, 4:0}
-    Precision = {0:0, 1:0, 2:0, 3:0, 4:0}
-    Recall = {0:0, 1:0, 2:0, 3:0, 4:0}
-    
-    for c in Precision:
-        denom = metrics[c]["tp"] + metrics[c]["fp"]
-        if(denom==0):
-            Precision[c]==0
-        else:
-            num = metrics[c]["tp"]
-            Precision[c] = num/denom
-            
-    for c in Recall:
-        denom = label_count[c]
-        if(denom==0):
-            Recall[c]==0
-        else:
-            num = metrics[c]["tp"]
-            Recall[c] = num/denom
-            
-    for c in F1:
-        if(Precision[c]==0 and Recall[c]==0):
-            F1[c]=0
-        else:
-            num = 2*Precision[c]*Recall[c]
-            denom = Precision[c] + Recall[c]
-            F1[c] = num/denom
-        
+
     logger.info(f"Testing Loss: {total_loss}")
     logger.info(f"Testing Accuracy: {total_acc}")
-    logger.info(f"Recall Computed: {Recall}")
-    logger.info(f"F1 Computed: {F1}")
 
 
 def train(model,
@@ -116,14 +48,12 @@ def train(model,
           criterion,
           optimizer,
           device,
-          hook,
           early_stopping):
 
-    epochs = 10
+    epochs = 5
     best_loss = 1e6
     image_dataset = {'train': train_loader, 'valid': validation_loader}
     loss_counter = 0
-    hook.set_mode(smd.modes.TRAIN)
 
     for epoch in range(epochs):
         for phase in ['train', 'valid']:
@@ -151,7 +81,7 @@ def train(model,
                 running_loss += loss.item() * inputs.size(0)
                 running_corrects += torch.sum(preds == labels.data).item()
                 running_samples += len(inputs)
-                if running_samples % 100 == 0:
+                if running_samples % 200 == 0:
                     accuracy = running_corrects / running_samples
                     print("Images [{}/{} ({:.0f}%)] Loss: {:.2f} Accuracy: {}/{} ({:.2f}%)".format(
                             running_samples,
@@ -163,6 +93,9 @@ def train(model,
                             100.0 * accuracy,
                         )
                     )
+                # NOTE: Comment lines below to train and test on whole dataset
+                # if running_samples > (0.2 * len(image_dataset[phase].dataset)):
+                #     break
 
             epoch_loss = running_loss / running_samples
             epoch_acc = running_corrects / running_samples
@@ -177,6 +110,7 @@ def train(model,
                                                                                         epoch_acc,
                                                                                         best_loss))
         if loss_counter == early_stopping:
+            logger.info('Early stopping')
             break
     return model
 
@@ -190,7 +124,7 @@ def net():
     num_features = model.fc.in_features
     model.fc = nn.Sequential(
                    nn.Linear(num_features, 128),
-                   nn.ReLU(),
+                   nn.ReLU(inplace=True),
                    nn.Linear(128, 5))
     return model
 
@@ -269,27 +203,21 @@ def main(args):
     model = net()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.fc.parameters(), lr=args.learning_rate)
+    optimizer = optim.Adam(model.fc.parameters(), lr=args.learning_rate)
     train_loader, test_loader, validation_loader = create_data_loaders(args, args.batch_size)
     model = model.to(device)
-    hook = smd.Hook.create_from_json_file()
-    hook.register_hook(model)
 
     logger.info("Training the model")
-    tic = time.perf_counter()
     model = train(model,
                   train_loader,
                   validation_loader,
                   criterion,
                   optimizer,
                   device,
-                  hook,
                   early_stopping=args.early_stopping_rounds)
-    toc = time.perf_counter()
-    logger.info(f"Training took {toc - tic:0.4f} seconds")
 
     logger.info("Testing the model")
-    test(model, test_loader, criterion, device, hook)
+    test(model, test_loader, criterion, device)
 
     logger.info("Saving the model")
     torch.save(model.state_dict(), os.path.join(args.model_dir, "model.pth"))
@@ -299,7 +227,7 @@ if __name__=='__main__':
     parser = argparse.ArgumentParser()
     
     parser.add_argument('--learning-rate', type=float, default=0.003)
-    parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--early-stopping-rounds', type=int, default=10)
     parser.add_argument('--data', type=str, default=os.environ['SM_CHANNEL_TRAINING'])
     parser.add_argument("--valid_dir", type=str, default=os.environ["SM_CHANNEL_VALID"])
