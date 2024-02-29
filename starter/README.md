@@ -31,8 +31,8 @@ The data has 10,441 images, where 1-5 represent subdirectory/labels for images.
 ### Access
 I used boto3 to connect to s3 and used below snippet to download the code from source.
 
-```s3_client.download_file('aft-vbi-pds', os.path.join('bin-images', file_name),
-                             os.path.join(directory, file_name))```
+`s3_client.download_file('aft-vbi-pds', os.path.join('bin-images', file_name),
+                             os.path.join(directory, file_name))`
 
 To upload the data I used this command:
 ```!aws s3 cp train s3://sagemaker-us-east-1-372402537355/capstone_project_amazon/train --recursive```
